@@ -7,6 +7,7 @@
 #include "src/page.h"
 
 #include <fstream>
+#include <regex>
 
 using boost::filesystem::path;
 
@@ -333,6 +334,82 @@ int main(int ac, const char* av[]) {
         string text = "User-agent: *\n"
                       "Disallow: ";
         return text;
+    });
+
+    CROW_ROUTE(app, "/api/transaction/<string>")
+    ([&](const crow::request& req, string tx_hash) {
+
+        crow::response r {xmrblocks.json_transaction(tx_hash).dump()};
+        r.set_header("Content-Type", "application/json");
+
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/block/<string>")
+    ([&](const crow::request& req, string block_no_or_hash) {
+
+        crow::response r {xmrblocks.json_block(block_no_or_hash).dump()};
+        r.set_header("Content-Type", "application/json");
+
+        return r;
+    });
+
+
+    CROW_ROUTE(app, "/api/transactions").methods("GET"_method)
+    ([&](const crow::request& req) {
+
+        string page  = regex_search(req.raw_url, regex {"page=\\d+"}) ?
+                       req.url_params.get("page") : "0";
+
+        string limit = regex_search(req.raw_url, regex {"limit=\\d+"}) ?
+                       req.url_params.get("limit") : "25";
+
+        crow::response r {xmrblocks.json_transactions(page, limit).dump()};
+        r.set_header("Content-Type", "application/json");
+
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/mempool")
+    ([&](const crow::request& req) {
+
+        crow::response r {xmrblocks.json_mempool().dump()};
+        r.set_header("Content-Type", "application/json");
+
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/search/<string>")
+    ([&](const crow::request& req, string search_value) {
+
+        crow::response r {xmrblocks.json_search(search_value).dump()};
+        r.set_header("Content-Type", "application/json");
+
+        return r;
+    });
+
+    CROW_ROUTE(app, "/api/outputs").methods("GET"_method)
+    ([&](const crow::request& req) {
+
+        string tx_hash = regex_search(req.raw_url, regex {"txhash=\\w+"}) ?
+                         req.url_params.get("txhash") : "";
+
+        string address  = regex_search(req.raw_url, regex {"address=\\w+"}) ?
+                       req.url_params.get("address") : "";
+
+        string viewkey = regex_search(req.raw_url, regex {"viewkey=\\w+"}) ?
+                       req.url_params.get("viewkey") : "";
+
+        bool tx_prove = regex_search(req.raw_url, regex {"txprove=[01]"}) ?
+                        boost::lexical_cast<bool>(req.url_params.get("txprove")) :
+                        false;
+
+        crow::response r {xmrblocks.json_outputs(
+                tx_hash, address, viewkey, tx_prove).dump()};
+
+        r.set_header("Content-Type", "application/json");
+
+        return r;
     });
 
 

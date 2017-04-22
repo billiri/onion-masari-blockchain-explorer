@@ -383,7 +383,7 @@ public:
         template_file["address"]         = get_full_page(xmreg::read(TMPL_ADDRESS));
         template_file["search_results"]  = get_full_page(xmreg::read(TMPL_SEARCH_RESULTS));
         template_file["tx_details"]      = xmreg::read(string(TMPL_PARIALS_DIR) + "/tx_details.html");
-        template_file["tx_table_head"]   = xmreg::read(string(TMPL_PARIALS_DIR) + "/tx_table_head.html");
+        template_file["tx_table_header"]   = xmreg::read(string(TMPL_PARIALS_DIR) + "/tx_table_header.html");
         template_file["tx_table_row"]    = xmreg::read(string(TMPL_PARIALS_DIR) + "/tx_table_row.html");
     }
 
@@ -1113,7 +1113,9 @@ public:
                 continue;
             }
 
-            tx_details txd = get_tx_details(tx);
+            tx_details txd = get_tx_details(tx, false,
+                                            _blk_height,
+                                            current_blockchain_height);
 
             // add fee to the rest
             sum_fees += txd.fee;
@@ -3742,25 +3744,6 @@ public:
 
     }
 
-    vector<transaction>
-    get_mempool_txs()
-    {
-        // get mempool data using rpc call
-        vector<pair<tx_info, transaction>> mempool_data = search_mempool();
-
-        // output only transactions
-        vector<transaction> mempool_txs;
-
-        mempool_txs.reserve(mempool_data.size());
-
-        for (const auto& a_pair: mempool_data)
-        {
-            mempool_txs.push_back(a_pair.second);
-        }
-
-        return mempool_txs;
-    }
-
     string
     show_search_results(const string& search_text,
         const vector<pair<string, vector<string>>>& all_possible_tx_hashes)
@@ -3871,7 +3854,7 @@ public:
 
         // read partial for showing details of tx(s) found
         map<string, string> partials {
-            {"tx_table_head", template_file["tx_table_head"]},
+            {"tx_table_head", template_file["tx_table_header"]},
             {"tx_table_row" , template_file["tx_table_row"]}
         };
 
@@ -3882,7 +3865,761 @@ public:
     }
 
 
+    /*
+     * Lets use this json api convention for success and error
+     * https://labs.omniti.com/labs/jsend
+     */
+    json
+    json_transaction(string tx_hash_str)
+    {
+        json j_response {
+            {"status", "fail"},
+            {"data"  , json {}}
+        };
+
+        json& j_data = j_response["data"];
+
+        // parse tx hash string to hash object
+        crypto::hash tx_hash;
+
+        if (!xmreg::parse_str_secret_key(tx_hash_str, tx_hash))
+        {
+            j_data["title"] = fmt::format("Cant parse tx hash: {:s}", tx_hash_str);
+            return j_response;
+        }
+
+        // get transaction
+        transaction tx;
+
+        // flag to indicate if tx is in mempool
+        bool found_in_mempool {false};
+
+        // for tx in blocks we get block timestamp
+        // for tx in mempool we get recievive time
+        uint64_t tx_timestamp {0};
+
+        if (!find_tx(tx_hash, tx, found_in_mempool, tx_timestamp))
+        {
+            j_data["title"] = fmt::format("Cant find tx hash: {:s}", tx_hash_str);
+            return j_response;
+        }
+
+        uint64_t block_height {0};
+        uint64_t is_coinbase_tx = is_coinbase(tx);
+        uint64_t no_confirmations {0};
+
+        if (found_in_mempool == false)
+        {
+
+            block blk;
+
+            try
+            {
+                // get block cointaining this tx
+                block_height = core_storage->get_db().get_tx_block_height(tx_hash);
+
+                if (!mcore->get_block_by_height(block_height, blk))
+                {
+                    j_data["title"] = fmt::format("Cant get block: {:d}", block_height);
+                    return j_response;
+                }
+
+                tx_timestamp = blk.timestamp;
+            }
+            catch (const exception& e)
+            {
+                j_response["status"]  = "error";
+                j_response["message"] = fmt::format("Tx does not exist in blockchain, "
+                                      "but was there before: {:s}", tx_hash_str);
+                return j_response;
+            }
+        }
+
+        string blk_timestamp_utc = xmreg::timestamp_to_str_gm(tx_timestamp);
+
+        // get the current blockchain height. Just to check
+        uint64_t bc_height = core_storage->get_current_blockchain_height();
+
+        tx_details txd = get_tx_details(tx, is_coinbase_tx, block_height, bc_height);
+
+        json outputs;
+
+        for (const auto& output: txd.output_pub_keys)
+        {
+            outputs.push_back(json {
+                {"public_key", pod_to_hex(output.first.key)},
+                {"amount"    , output.second}
+            });
+        }
+
+        json inputs;
+
+        for (const auto& input: txd.input_key_imgs)
+        {
+            inputs.push_back(json {
+                    {"key_image"  , pod_to_hex(input.k_image)},
+                    {"amount"     , input.amount}
+            });
+        }
+
+        if (found_in_mempool == false)
+        {
+            no_confirmations = txd.no_confirmations;
+        }
+
+        // get tx from tx fetched. can be use to double check
+        // if what we return in the json response agrees with
+        // what tx_hash was requested
+        string tx_hash_str_again = pod_to_hex(get_transaction_hash(tx));
+
+        // get basic tx info
+        j_data = get_tx_json(tx, txd);
+
+        // append additional info from block, as we don't
+        // return block data in this function
+        j_data["timestamp"]      = tx_timestamp;
+        j_data["timestamp_utc"]  = blk_timestamp_utc;
+        j_data["block_height"]   = block_height;
+        j_data["confirmations"]  = no_confirmations;
+        j_data["outputs"]        = outputs;
+        j_data["inputs"]         = inputs;
+        j_data["current_height"] = bc_height;
+
+        j_response["status"] = "success";
+
+        return j_response;
+    }
+
+    /*
+     * Lets use this json api convention for success and error
+     * https://labs.omniti.com/labs/jsend
+     */
+    json
+    json_block(string block_no_or_hash)
+    {
+        json j_response {
+                {"status", "fail"},
+                {"data"  , json {}}
+        };
+
+        json& j_data = j_response["data"];
+
+        uint64_t current_blockchain_height
+                =  core_storage->get_current_blockchain_height();
+
+        uint64_t block_height {0};
+
+        crypto::hash blk_hash;
+
+        block blk;
+
+        if (block_no_or_hash.length() <= 8)
+        {
+            // we have something that seems to be a block number
+            try
+            {
+                block_height  = boost::lexical_cast<uint64_t>(block_no_or_hash);
+            }
+            catch (const boost::bad_lexical_cast& e)
+            {
+                j_data["title"] = fmt::format(
+                        "Cant parse block number: {:s}", block_no_or_hash);
+                return j_response;
+            }
+
+            if (block_height > current_blockchain_height)
+            {
+                j_data["title"] = fmt::format(
+                        "Requested block is higher than blockchain:"
+                                " {:d}, {:d}", block_height,current_blockchain_height);
+                return j_response;
+            }
+
+            if (!mcore->get_block_by_height(block_height, blk))
+            {
+                j_data["title"] = fmt::format("Cant get block: {:d}", block_height);
+                return j_response;
+            }
+
+            blk_hash = core_storage->get_block_id_by_height(block_height);
+
+        }
+        else if (block_no_or_hash.length() == 64)
+        {
+            // this seems to be block hash
+            if (!xmreg::parse_str_secret_key(block_no_or_hash, blk_hash))
+            {
+                j_data["title"] = fmt::format("Cant parse blk hash: {:s}", block_no_or_hash);
+                return j_response;
+            }
+
+            if (!core_storage->get_block_by_hash(blk_hash, blk))
+            {
+                j_data["title"] = fmt::format("Cant get block: {:s}", blk_hash);
+                return j_response;
+            }
+
+            block_height = core_storage->get_db().get_block_height(blk_hash);
+        }
+        else
+        {
+            j_data["title"] = fmt::format("Cant find blk using search string: {:s}", block_no_or_hash);
+            return j_response;
+        }
+
+
+        // get block size in bytes
+        uint64_t blk_size = core_storage->get_db().get_block_size(block_height);
+
+        // miner reward tx
+        transaction coinbase_tx = blk.miner_tx;
+
+        // transcation in the block
+        vector<crypto::hash> tx_hashes = blk.tx_hashes;
+
+        // sum of all transactions in the block
+        uint64_t sum_fees = 0;
+
+        // get tx details for the coinbase tx, i.e., miners reward
+        tx_details txd_coinbase = get_tx_details(blk.miner_tx, true,
+                                                 block_height,
+                                                 current_blockchain_height);
+
+        json j_txs;
+
+        j_txs.push_back(get_tx_json(coinbase_tx, txd_coinbase));
+
+        // for each transaction in the block
+        for (size_t i = 0; i < blk.tx_hashes.size(); ++i)
+        {
+            const crypto::hash &tx_hash = blk.tx_hashes.at(i);
+
+            // get transaction
+            transaction tx;
+
+            if (!mcore->get_tx(tx_hash, tx))
+            {
+                j_response["status"]  = "error";
+                j_response["message"]
+                        = fmt::format("Cant get transactions in block: {:d}", block_height);
+                return j_response;
+            }
+
+            tx_details txd = get_tx_details(tx, false,
+                                            block_height,
+                                            current_blockchain_height);
+
+            j_txs.push_back(get_tx_json(tx, txd));
+
+            // add fee to the rest
+            sum_fees += txd.fee;
+        }
+
+        j_data = json {
+            {"block_height"  , block_height},
+            {"hash"          , pod_to_hex(blk_hash)},
+            {"timestamp"     , blk.timestamp},
+            {"timestamp_utc" , xmreg::timestamp_to_str_gm(blk.timestamp)},
+            {"block_height"  , block_height},
+            {"size"          , blk_size},
+            {"txs"           , j_txs},
+            {"current_height", current_blockchain_height}
+        };
+
+        j_response["status"] = "success";
+
+        return j_response;
+    }
+
+
+
+    /*
+     * Lets use this json api convention for success and error
+     * https://labs.omniti.com/labs/jsend
+     */
+    json
+    json_transactions(string _page, string _limit)
+    {
+        json j_response {
+            {"status", "fail"},
+            {"data",   json {}}
+        };
+
+        json& j_data = j_response["data"];
+
+        // parse page and limit into numbers
+
+        uint64_t page {0};
+        uint64_t limit {0};
+
+        try
+        {
+            page  = boost::lexical_cast<uint64_t>(_page);
+            limit = boost::lexical_cast<uint64_t>(_limit);
+        }
+        catch (const boost::bad_lexical_cast& e)
+        {
+            j_data["title"] = fmt::format(
+                    "Cant parse page and/or limit numbers: {:s}, {:s}", _page, _limit);
+            return j_response;
+        }
+
+        // enforce maximum number of blocks per page to 100
+        limit = limit > 100 ? 100 : limit;
+
+        //get current server timestamp
+        server_timestamp = std::time(nullptr);
+
+        uint64_t local_copy_server_timestamp = server_timestamp;
+
+        uint64_t height = core_storage->get_current_blockchain_height();
+
+        // calculate starting and ending block numbers to show
+        int64_t start_height = height - limit * (page + 1);
+
+        // check if start height is not below range
+        start_height = start_height < 0 ? 0 : start_height;
+
+        int64_t end_height = start_height + limit - 1;
+
+        // loop index
+        int64_t i = end_height;
+
+        j_data["blocks"] = json::array();
+        json& j_blocks = j_data["blocks"];
+
+        // iterate over last no_of_last_blocks of blocks
+        while (i >= start_height)
+        {
+            // get block at the given height i
+            block blk;
+
+            if (!mcore->get_block_by_height(i, blk))
+            {
+                j_response["status"]  = "error";
+                j_response["message"] = fmt::format("Cant get block: {:d}", i);
+                return j_response;
+            }
+
+            // get block size in bytes
+            double blk_size = core_storage->get_db().get_block_size(i);
+
+            crypto::hash blk_hash = core_storage->get_block_id_by_height(i);
+
+            // get block age
+            pair<string, string> age = get_age(local_copy_server_timestamp, blk.timestamp);
+
+            j_blocks.push_back(json {
+                {"height"       , i},
+                {"hash"         , pod_to_hex(blk_hash)},
+                {"age"          , age.first},
+                {"size"         , blk_size},
+                {"timestamp"    , blk.timestamp},
+                {"timestamp_utc", xmreg::timestamp_to_str_gm(blk.timestamp)},
+                {"txs"          , json::array()}
+            });
+
+            json& j_txs = j_blocks.back()["txs"];
+
+            list<cryptonote::transaction> blk_txs {blk.miner_tx};
+            list<crypto::hash> missed_txs;
+
+            if (!core_storage->get_transactions(blk.tx_hashes, blk_txs, missed_txs))
+            {
+                j_response["status"]  = "error";
+                j_response["message"] = fmt::format("Cant get transactions in block: {:d}", i);
+                return j_response;
+            }
+
+            (void) missed_txs;
+
+            for(auto it = blk_txs.begin(); it != blk_txs.end(); ++it)
+            {
+                const cryptonote::transaction &tx = *it;
+
+                const tx_details& txd = get_tx_details(tx, false, i, height);
+
+                j_txs.push_back(get_tx_json(tx, txd));
+            }
+
+            --i;
+        }
+
+        j_data["page"]           = page;
+        j_data["limit"]          = limit;
+        j_data["current_height"] = height;
+
+        j_response["status"] = "success";
+
+        return j_response;
+    }
+
+
+    /*
+     * Lets use this json api convention for success and error
+     * https://labs.omniti.com/labs/jsend
+     */
+    json
+    json_mempool()
+    {
+        json j_response {
+                {"status", "fail"},
+                {"data",   json {}}
+        };
+
+        json& j_data = j_response["data"];
+
+        //get current server timestamp
+        server_timestamp = std::time(nullptr);
+
+        uint64_t local_copy_server_timestamp = server_timestamp;
+
+        uint64_t height = core_storage->get_current_blockchain_height();
+
+        vector<pair<tx_info, transaction>> mempool_data = search_mempool();
+
+        // for each transaction in the memory pool
+        for (const auto& a_pair: mempool_data)
+        {
+            const tx_details& txd = get_tx_details(a_pair.second, false, 1, height); // 1 is dummy here
+
+            // get basic tx info
+            json j_tx = get_tx_json(a_pair.second, txd);
+
+            // we add some extra data, for mempool txs, such as recieve timestamp
+            j_tx["timestamp"]     = a_pair.first.receive_time;
+            j_tx["timestamp_utc"] = xmreg::timestamp_to_str_gm(a_pair.first.receive_time);
+
+            j_data.push_back(j_tx);
+        }
+
+        j_response["status"] = "success";
+
+        return j_response;
+    }
+
+
+    /*
+     * Lets use this json api convention for success and error
+     * https://labs.omniti.com/labs/jsend
+     */
+    json
+    json_search(const string& search_text)
+    {
+        json j_response {
+                {"status", "fail"},
+                {"data",   json {}}
+        };
+
+        json& j_data = j_response["data"];
+
+        //get current server timestamp
+        server_timestamp = std::time(nullptr);
+
+        uint64_t local_copy_server_timestamp = server_timestamp;
+
+        uint64_t height = core_storage->get_current_blockchain_height();
+
+        uint64_t search_str_length = search_text.length();
+
+        // first let check if the search_text matches any tx or block hash
+        if (search_str_length == 64)
+        {
+            // first check for tx
+            json j_tx = json_transaction(search_text);
+
+            if (j_tx["status"] == "success")
+            {
+                j_response["data"]   = j_tx["data"];
+                j_response["data"]["title"]  = "transaction";
+                j_response["status"] = "success";
+                return j_response;
+            }
+
+            // now check for block
+
+            json j_block = json_block(search_text);
+
+            if (j_block["status"] == "success")
+            {
+                j_response["data"]  = j_block["data"];
+                j_response["data"]["title"]  = "block";
+                j_response["status"] = "success";
+                return j_response;
+            }
+        }
+
+        // now lets see if this is a block number
+        if (search_str_length <= 8)
+        {
+            json j_block = json_block(search_text);
+
+            if (j_block["status"] == "success")
+            {
+                j_response["data"]   = j_block["data"];
+                j_response["data"]["title"]  = "block";
+                j_response["status"] = "success";
+                return j_response;
+            }
+        }
+
+        j_data["title"] = "Nothing was found that matches search string: " + search_text;
+
+        return j_response;
+    }
+
+    json
+    json_outputs(string tx_hash_str,
+                 string address_str,
+                 string viewkey_str,
+                 bool tx_prove = false)
+    {
+        boost::trim(tx_hash_str);
+        boost::trim(address_str);
+        boost::trim(viewkey_str);
+
+        json j_response {
+                {"status", "fail"},
+                {"data",   json {}}
+        };
+
+        json& j_data = j_response["data"];
+
+
+        if (tx_hash_str.empty())
+        {
+            j_response["status"]  = "error";
+            j_response["message"] = "Tx hash not provided";
+            return j_response;
+        }
+
+        if (address_str.empty())
+        {
+            j_response["status"]  = "error";
+            j_response["message"] = "Monero address not provided";
+            return j_response;
+        }
+
+        if (viewkey_str.empty())
+        {
+            if (!tx_prove)
+            {
+                j_response["status"]  = "error";
+                j_response["message"] = "Viewkey not provided";
+                return j_response;
+            }
+            else
+            {
+                j_response["status"]  = "error";
+                j_response["message"] = "Tx private key not provided";
+                return j_response;
+            }
+        }
+
+
+        // parse tx hash string to hash object
+        crypto::hash tx_hash;
+
+        if (!xmreg::parse_str_secret_key(tx_hash_str, tx_hash))
+        {
+            j_response["status"]  = "error";
+            j_response["message"] = "Cant parse tx hash: " + tx_hash_str;
+            return j_response;
+        }
+
+        // parse string representing given monero address
+        cryptonote::account_public_address address;
+
+        if (!xmreg::parse_str_address(address_str,  address, testnet))
+        {
+            j_response["status"]  = "error";
+            j_response["message"] = "Cant parse monero address: " + address_str;
+            return j_response;
+
+        }
+
+        // parse string representing given private key
+        crypto::secret_key prv_view_key;
+
+        if (!xmreg::parse_str_secret_key(viewkey_str, prv_view_key))
+        {
+            j_response["status"]  = "error";
+            j_response["message"] = "Cant parse view key or tx private key: "
+                                    + viewkey_str;
+            return j_response;
+        }
+
+        // get transaction
+        transaction tx;
+
+        // flag to indicate if tx is in mempool
+        bool found_in_mempool {false};
+
+        // for tx in blocks we get block timestamp
+        // for tx in mempool we get recievive time
+        uint64_t tx_timestamp {0};
+
+        if (!find_tx(tx_hash, tx, found_in_mempool, tx_timestamp))
+        {
+            j_data["title"] = fmt::format("Cant find tx hash: {:s}", tx_hash_str);
+            return j_response;
+        }
+
+        (void) tx_timestamp;
+        (void) found_in_mempool;
+
+        tx_details txd = get_tx_details(tx);
+
+        // public transaction key is combined with our viewkey
+        // to create, so called, derived key.
+        key_derivation derivation;
+
+        public_key pub_key = tx_prove ? address.m_view_public_key : txd.pk;
+
+        //cout << "txd.pk: " << pod_to_hex(txd.pk) << endl;
+
+        if (!generate_key_derivation(pub_key, prv_view_key, derivation))
+        {
+            j_response["status"]  = "error";
+            j_response["message"] = "Cant calculate key_derivation";
+            return j_response;
+        }
+
+        uint64_t output_idx {0};
+
+        std::vector<uint64_t> money_transfered(tx.vout.size(), 0);
+
+        j_data["outputs"] = json::array();
+        json& j_outptus   = j_data["outputs"];
+
+        for (pair<txout_to_key, uint64_t>& outp: txd.output_pub_keys)
+        {
+
+            // get the tx output public key
+            // that normally would be generated for us,
+            // if someone had sent us some xmr.
+            public_key tx_pubkey;
+
+            derive_public_key(derivation,
+                              output_idx,
+                              address.m_spend_public_key,
+                              tx_pubkey);
+
+            // check if generated public key matches the current output's key
+            bool mine_output = (outp.first.key == tx_pubkey);
+
+            // if mine output has RingCT, i.e., tx version is 2
+            if (mine_output && tx.version == 2)
+            {
+                // cointbase txs have amounts in plain sight.
+                // so use amount from ringct, only for non-coinbase txs
+                if (!is_coinbase(tx))
+                {
+
+                    // initialize with regular amount
+                    uint64_t rct_amount = money_transfered[output_idx];
+
+                    bool r;
+
+                    r = decode_ringct(tx.rct_signatures,
+                                      pub_key,
+                                      prv_view_key,
+                                      output_idx,
+                                      tx.rct_signatures.ecdhInfo[output_idx].mask,
+                                      rct_amount);
+
+                    if (!r)
+                    {
+                        cerr << "\nshow_my_outputs: Cant decode ringCT! " << endl;
+                    }
+
+                    outp.second         = rct_amount;
+                    money_transfered[output_idx] = rct_amount;
+
+                } // if (!is_coinbase(tx))
+
+            }  // if (mine_output && tx.version == 2)
+
+            j_outptus.push_back(json {
+                {"output_pubkey", pod_to_hex(outp.first.key)},
+                {"amount"       , outp.second},
+                {"match"        , mine_output},
+                {"output_idx"   , output_idx},
+            });
+
+            ++output_idx;
+
+        } // for (pair<txout_to_key, uint64_t>& outp: txd.output_pub_keys)
+
+        // return parsed values. can be use to double
+        // check if submited data in the request
+        // matches to what was used to produce response.
+        j_data["tx_hash"]  = pod_to_hex(txd.hash);
+        j_data["address"]  = pod_to_hex(address);
+        j_data["viewkey"]  = pod_to_hex(prv_view_key);
+        j_data["tx_prove"] = tx_prove;
+
+        j_response["status"] = "success";
+
+        return j_response;
+    }
 private:
+
+    json
+    get_tx_json(const transaction& tx, const tx_details& txd)
+    {
+        json j_tx {
+                {"tx_hash"     , pod_to_hex(txd.hash)},
+                {"tx_fee"      , txd.fee},
+                {"mixin"       , txd.mixin_no},
+                {"tx_size"     , txd.size},
+                {"xmr_outputs" , txd.xmr_outputs},
+                {"xmr_inputs"  , txd.xmr_inputs},
+                {"tx_version"  , txd.version},
+                {"rct_type"    , tx.rct_signatures.type},
+                {"coinbase"    , is_coinbase(tx)},
+                {"mixin"       , txd.mixin_no},
+                {"extra"       , txd.get_extra_str()},
+                {"payment_id"  , (txd.payment_id  != null_hash  ? pod_to_hex(txd.payment_id)  : "")},
+                {"payment_id8" , (txd.payment_id8 != null_hash8 ? pod_to_hex(txd.payment_id8) : "")},
+        };
+
+        return j_tx;
+    }
+
+    bool
+    find_tx(const crypto::hash& tx_hash,
+            transaction& tx,
+            bool& found_in_mempool,
+            uint64_t& tx_timestamp)
+    {
+
+        found_in_mempool = false;
+
+        if (!mcore->get_tx(tx_hash, tx))
+        {
+            cerr << "Cant get tx in blockchain: " << tx_hash
+                 << ". \n Check mempool now" << endl;
+
+            vector<pair<tx_info, transaction>> found_txs
+                    = search_mempool(tx_hash);
+
+            if (!found_txs.empty())
+            {
+                // there should be only one tx found
+                tx = found_txs.at(0).second;
+                found_in_mempool = true;
+                tx_timestamp = found_txs.at(0).first.receive_time;
+            }
+            else
+            {
+                // tx is nowhere to be found :-(
+                return false;
+            }
+        }
+
+        return true;
+    }
 
 
     void
@@ -4457,14 +5194,14 @@ private:
             // get the current blockchain height. Just to check
             uint64_t bc_height = core_storage->get_current_blockchain_height();
 
-            txd.no_confirmations = bc_height - (txd.blk_height - 1);
+            txd.no_confirmations = bc_height - (txd.blk_height);
         }
         else
         {
             // if we know blk_height, and current blockchan height
             // just use it to get no_confirmations.
             
-            txd.no_confirmations = bc_height - (blk_height - 1);
+            txd.no_confirmations = bc_height - (blk_height);
         }
 
         return txd;
@@ -4488,6 +5225,9 @@ private:
     vector<pair<tx_info, transaction>>
     search_mempool(crypto::hash tx_hash = null_hash)
     {
+        // if tx_hash == null_hash then this method
+        // will just return the vector containing all
+        // txs in mempool
 
         vector<pair<tx_info, transaction>> found_txs;
 
@@ -4528,10 +5268,12 @@ private:
                     continue;
                 }
 
-                if (tx_hash == mem_tx_hash)
+                if (tx_hash == mem_tx_hash || tx_hash == null_hash)
                 {
                     found_txs.push_back(make_pair(_tx_info, tx));
-                    break;
+
+                    if (tx_hash != null_hash)
+                        break;
                 }
 
             } //  if (hex_to_pod(_tx_info.id_hash, mem_tx_hash))
