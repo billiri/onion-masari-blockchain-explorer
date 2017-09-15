@@ -2208,7 +2208,6 @@ namespace xmreg
 
                         mstch::map tx_cd_data {
                                 {"no_of_sources"      , static_cast<uint64_t>(no_of_sources)},
-                                {"use_rct"            , tx_cd.use_rct},
                                 {"change_amount"      , xmreg::xmr_amount_to_str(tx_change.amount)},
                                 {"has_payment_id"     , (payment_id  != null_hash)},
                                 {"has_payment_id8"    , (payment_id8 != null_hash8)},
@@ -2259,7 +2258,7 @@ namespace xmreg
 
                             tx_out_index real_toi;
 
-                            uint64_t tx_source_amount = (tx_source.rct ? 0 : tx_source.amount);
+                            uint64_t tx_source_amount = 0;
 
                             try
                             {
@@ -2631,7 +2630,7 @@ namespace xmreg
 
                         uint64_t index_of_real_output = tx_source.outputs[tx_source.real_output].first;
 
-                        uint64_t tx_source_amount = (tx_source.rct ? 0 : tx_source.amount);
+                        uint64_t tx_source_amount = 0;
 
                         tx_out_index real_toi;
 
@@ -3244,16 +3243,38 @@ namespace xmreg
 
                 uint64_t xmr_amount = td.amount();
 
-                // if the output is RingCT, i.e., tx version is 2
-                // need to decode its amount
-                if (td.is_rct())
-                {
-                    // get tx associated with the given output
-                    transaction tx;
+                // get tx associated with the given output
+                transaction tx;
 
-                    if (!mcore->get_tx(td.m_txid, tx))
+                if (!mcore->get_tx(td.m_txid, tx))
+                {
+                    string error_msg = fmt::format("Cant get tx of hash: {:s}", td.m_txid);
+
+                    context["has_error"] = true;
+                    context["error_msg"] = error_msg;
+
+                    return mstch::render(full_page, context);
+                }
+
+                public_key tx_pub_key = xmreg::get_tx_pub_key_from_received_outs(tx);
+
+                // cointbase txs have amounts in plain sight.
+                // so use amount from ringct, only for non-coinbase txs
+                if (!is_coinbase(tx))
+                {
+
+                    bool r = decode_ringct(tx.rct_signatures,
+                                           tx_pub_key,
+                                           prv_view_key,
+                                           td.m_internal_output_index,
+                                           tx.rct_signatures.ecdhInfo[td.m_internal_output_index].mask,
+                                           xmr_amount);
+
+                    if (!r)
                     {
-                        string error_msg = fmt::format("Cant get tx of hash: {:s}", td.m_txid);
+                        string error_msg = fmt::format(
+                                "Cant decode RingCT for output: {:s}",
+                                txout_key.key);
 
                         context["has_error"] = true;
                         context["error_msg"] = error_msg;
@@ -3261,35 +3282,7 @@ namespace xmreg
                         return mstch::render(full_page, context);
                     }
 
-                    public_key tx_pub_key = xmreg::get_tx_pub_key_from_received_outs(tx);
-
-                    // cointbase txs have amounts in plain sight.
-                    // so use amount from ringct, only for non-coinbase txs
-                    if (!is_coinbase(tx))
-                    {
-
-                        bool r = decode_ringct(tx.rct_signatures,
-                                               tx_pub_key,
-                                               prv_view_key,
-                                               td.m_internal_output_index,
-                                               tx.rct_signatures.ecdhInfo[td.m_internal_output_index].mask,
-                                               xmr_amount);
-
-                        if (!r)
-                        {
-                            string error_msg = fmt::format(
-                                    "Cant decode RingCT for output: {:s}",
-                                    txout_key.key);
-
-                            context["has_error"] = true;
-                            context["error_msg"] = error_msg;
-
-                            return mstch::render(full_page, context);
-                        }
-
-                    } //  if (!is_coinbase(tx))
-
-                } // if (td.is_rct())
+                } //  if (!is_coinbase(tx))
 
                 uint64_t blk_timestamp = core_storage
                         ->get_db().get_block_timestamp(td.m_block_height);
@@ -3315,8 +3308,7 @@ namespace xmreg
                         {"amount"              , xmreg::xmr_amount_to_str(xmr_amount)},
                         {"tx_hash"             , REMOVE_HASH_BRAKETS(fmt::format("{:s}", td.m_txid))},
                         {"timestamp"           , xmreg::timestamp_to_str_gm(blk_timestamp)},
-                        {"is_spent"            , is_output_spent},
-                        {"is_ringct"           , td.m_rct}
+                        {"is_spent"            , is_output_spent}
                 };
 
                 ++output_no;
@@ -4969,7 +4961,7 @@ namespace xmreg
                     {"last_git_commit_hash", string {GIT_COMMIT_HASH}},
                     {"last_git_commit_date", string {GIT_COMMIT_DATETIME}},
                     {"git_branch_name"     , string {GIT_BRANCH_NAME}},
-                    {"monero_version_full" , string {MONERO_VERSION_FULL}},
+                    {"masari_version_full" , string {MASARI_VERSION_FULL}},
                     {"api"                 , ONIONEXPLORER_RPC_VERSION},
                     {"blockchain_height"   , core_storage->get_current_blockchain_height()}
             };
@@ -5927,7 +5919,7 @@ namespace xmreg
                     {"last_git_commit_hash", string {GIT_COMMIT_HASH}},
                     {"last_git_commit_date", string {GIT_COMMIT_DATETIME}},
                     {"git_branch_name"     , string {GIT_BRANCH_NAME}},
-                    {"monero_version_full" , string {MONERO_VERSION_FULL}},
+                    {"masari_version_full" , string {MASARI_VERSION_FULL}},
                     {"api"                 , std::to_string(ONIONEXPLORER_RPC_VERSION_MAJOR)
                                              + "."
                                              + std::to_string(ONIONEXPLORER_RPC_VERSION_MINOR)},
