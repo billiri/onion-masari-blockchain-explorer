@@ -634,7 +634,6 @@ namespace xmreg
                         txd_map.insert({"height"    , i});
                         txd_map.insert({"blk_hash"  , blk_hash_str});
                         txd_map.insert({"age"       , age.first});
-                        txd_map.insert({"is_ringct" , (tx.version > 1)});
                         txd_map.insert({"rct_type"  , tx.rct_signatures.type});
                         txd_map.insert({"blk_size"  , blk_size_str});
 
@@ -1687,8 +1686,7 @@ namespace xmreg
                 // check if generated public key matches the current output's key
                 bool mine_output = (outp.first.key == tx_pubkey);
 
-                // if mine output has RingCT, i.e., tx version is 2
-                if (mine_output && tx.version == 2)
+                if (mine_output)
                 {
                     // cointbase txs have amounts in plain sight.
                     // so use amount from ringct, only for non-coinbase txs
@@ -1940,7 +1938,7 @@ namespace xmreg
                         bool mine_output = (txout_k.key == tx_pubkey_generated);
 
 
-                        if (mine_output && mixin_tx.version == 2)
+                        if (mine_output)
                         {
                             // cointbase txs have amounts in plain sight.
                             // so use amount from ringct, only for non-coinbase txs
@@ -1965,7 +1963,7 @@ namespace xmreg
 
                                 amount = rct_amount;
 
-                            } // if (mine_output && mixin_tx.version == 2)
+                            } // if (mine_output)
                         }
 
                         // makre only
@@ -2007,21 +2005,7 @@ namespace xmreg
                             // sum up only first output matched found in each input
                             if (no_of_output_matches_found == 0)
                             {
-                                // for regular txs, just concentrated on outputs
-                                // which have same amount as the key image.
-                                // for ringct its not possible to know for sure amount
-                                // in key image without spend key, so we just use all
-                                // for regular/old txs there must be also a match
-                                // in amounts, not only in output public keys
-                                if (mixin_tx.version < 2 && amount == in_key.amount)
-                                {
-                                    sum_mixin_xmr += amount;
-                                }
-                                else if (mixin_tx.version == 2) // ringct
-                                {
-                                    sum_mixin_xmr += amount;
-                                }
-
+                                sum_mixin_xmr += amount;
                                 no_of_matched_mixins++;
                             }
 
@@ -4612,8 +4596,8 @@ namespace xmreg
                 // check if generated public key matches the current output's key
                 bool mine_output = (outp.first.key == tx_pubkey);
 
-                // if mine output has RingCT, i.e., tx version is 2
-                if (mine_output && tx.version == 2)
+                // if mine output
+                if (mine_output)
                 {
                     // cointbase txs have amounts in plain sight.
                     // so use amount from ringct, only for non-coinbase txs
@@ -4642,7 +4626,7 @@ namespace xmreg
 
                     } // if (!is_coinbase(tx))
 
-                }  // if (mine_output && tx.version == 2)
+                }  // if (mine_output)
 
                 j_outptus.push_back(json {
                         {"output_pubkey", pod_to_hex(outp.first.key)},
@@ -5054,8 +5038,8 @@ namespace xmreg
                     // check if generated public key matches the current output's key
                     bool mine_output = (outp.first.key == tx_pubkey);
 
-                    // if mine output has RingCT, i.e., tx version is 2
-                    if (mine_output && tx.version == 2)
+                    // if mine output
+                    if (mine_output)
                     {
                         // cointbase txs have amounts in plain sight.
                         // so use amount from ringct, only for non-coinbase txs
@@ -5088,7 +5072,7 @@ namespace xmreg
 
                         } // if (!is_coinbase(tx))
 
-                    }  // if (mine_output && tx.version == 2)
+                    }  // if (mine_output)
 
                     if (mine_output)
                     {
@@ -5293,7 +5277,6 @@ namespace xmreg
                     {"with_ring_signatures"  , static_cast<bool>(
                                                        with_ring_signatures)},
                     {"tx_json"               , tx_json},
-                    {"is_ringct"             , (tx.version > 1)},
                     {"rct_type"              , tx.rct_signatures.type},
                     {"has_error"             , false},
                     {"error_msg"             , string("")},
